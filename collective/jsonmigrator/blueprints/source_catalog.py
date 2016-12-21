@@ -5,15 +5,15 @@ from collective.transmogrifier.interfaces import ISectionBlueprint
 from zope.interface import classProvides, implements
 
 import base64
+import requests
 import threading
 import time
 import urllib
 import urllib2
+import json
+import logging
 
-try:
-    import json
-except ImportError:
-    import simplejson as json
+logging.getLogger("requests").setLevel(logging.WARNING)
 
 
 class CatalogSourceSection(object):
@@ -31,10 +31,10 @@ class CatalogSourceSection(object):
 
         self.remote_url = self.get_option('remote-url',
                                           'http://localhost:8080')
-        remote_username = self.get_option('remote-username', 'admin')
-        remote_password = self.get_option('remote-password', 'admin')
+        self.remote_username = self.get_option('remote-username', 'admin')
+        self.remote_password = self.get_option('remote-password', 'admin')
 
-        catalog_path = self.get_option('catalog-path', '/Plone/portal_catalog')
+        catalog_path = self.get_option('catalog-path', '/portal_catalog')
         self.site_path_length = len('/'.join(catalog_path.split('/')[:-1]))
 
         catalog_query = self.get_option('catalog-query', None)
@@ -49,16 +49,11 @@ class CatalogSourceSection(object):
         auth_handler = urllib2.HTTPBasicAuthHandler()
         auth_handler.add_password(realm='Zope',
                                   uri=self.remote_url,
-                                  user=remote_username,
-                                  passwd=remote_password)
+                                  user=self.remote_username,
+                                  passwd=self.remote_password)
         opener = urllib2.build_opener(auth_handler)
         urllib2.install_opener(opener)
-
-        req = urllib2.Request(
-            '%s%s/get_catalog_results' %
-            (self.remote_url, catalog_path), urllib.urlencode(
-                {
-                    'catalog_query': catalog_query}))
+        req = urllib2.Request( '%s%s/get_catalog_results' % (self.remote_url, catalog_path), urllib.urlencode( { 'catalog_query': catalog_query}))
         try:
             f = urllib2.urlopen(req)
             resp = f.read()
@@ -86,7 +81,8 @@ class CatalogSourceSection(object):
             yield item
 
         queue = QueuedItemLoader(self.remote_url, self.item_paths,
-                                 self.remote_skip_paths, self.queue_length)
+                                 self.remote_skip_paths, self.queue_length,
+                                 self.remote_username, self.remote_password)
         queue.start()
 
         for item in queue:
@@ -99,13 +95,16 @@ class CatalogSourceSection(object):
 
 class QueuedItemLoader(threading.Thread):
 
-    def __init__(self, remote_url, paths, remote_skip_paths, queue_length):
+    def __init__(self, remote_url, paths, remote_skip_paths, queue_length,
+                 remote_username, remote_password):
         super(QueuedItemLoader, self).__init__()
 
         self.remote_url = remote_url
         self.paths = list(paths)
         self.remote_skip_paths = remote_skip_paths
         self.queue_length = queue_length
+        self.remote_username = remote_username
+        self.remote_password = remote_password
 
         self.queue = []
         self.finished = len(paths) == 0
@@ -138,17 +137,13 @@ class QueuedItemLoader(threading.Thread):
 
     def _load_path(self, path):
         item_url = '%s%s/get_item' % (self.remote_url, urllib.quote(path))
-        try:
-            f = urllib2.urlopen(item_url)
-            item_json = f.read()
-        except urllib2.URLError as e:
-            logger.error(
-                "Failed reading item from %s. %s" %
-                (item_url, str(e)))
+
+        resp = requests.get(item_url, auth=(self.remote_username , self.remote_password))
+        content_type = resp.headers['content-type']
+        if content_type != 'application/json':
+            logger.error('Could not get : {}'.format(resp.url))
             return None
-        try:
-            item = json.loads(item_json)
-        except json.JSONDecodeError:
-            logger.error("Could not decode item from %s." % item_url)
-            return None
+        else:
+            item = resp.json()
+
         return item
