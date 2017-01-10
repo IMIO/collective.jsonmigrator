@@ -138,7 +138,10 @@ class QueuedItemLoader(threading.Thread):
     def _load_path(self, path):
         item_url = '%s%s/get_item' % (self.remote_url, urllib.quote(path))
 
-        resp = requests.get(item_url, auth=(self.remote_username , self.remote_password))
+        resp = requests.get(
+            item_url,
+            auth=(self.remote_username , self.remote_password),
+            timeout=30)
         content_type = resp.headers['content-type']
         if content_type != 'application/json':
             logger.error('Could not get : {}'.format(resp.url))
