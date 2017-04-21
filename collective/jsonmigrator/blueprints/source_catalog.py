@@ -2,18 +2,23 @@
 from collective.jsonmigrator import logger
 from collective.transmogrifier.interfaces import ISection
 from collective.transmogrifier.interfaces import ISectionBlueprint
-from zope.interface import classProvides, implements
+from cpskin.migration.blueprints.utils import BATCH_CURRENT_KEY
+from cpskin.migration.blueprints.utils import BATCH_SIZE_KEY
+from cpskin.migration.blueprints.utils import TOTAL_OBJECTS_KEY
+from zope.annotation.interfaces import IAnnotations
+from zope.interface import classProvides
+from zope.interface import implements
 
 import base64
+import json
+import logging
 import requests
 import threading
 import time
 import urllib
 import urllib2
-import json
-import logging
 
-logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING)
 
 
 class CatalogSourceSection(object):
@@ -43,8 +48,7 @@ class CatalogSourceSection(object):
 
         self.remote_skip_paths = self.get_option('remote-skip-paths',
                                                  '').split()
-        self.queue_length = int(self.get_option('queue-size', '10'))
-
+        self.queue_length = int(self.get_option('queue-size', '2'))
         # Install a basic auth handler
         auth_handler = urllib2.HTTPBasicAuthHandler()
         auth_handler.add_password(realm='Zope',
@@ -61,6 +65,12 @@ class CatalogSourceSection(object):
             raise
 
         self.item_paths = sorted(json.loads(resp))
+        anno = IAnnotations(self.context)
+        anno[TOTAL_OBJECTS_KEY] = len(self.item_paths)
+        batch_current = int(anno[BATCH_CURRENT_KEY])
+        batch_size = int(anno[BATCH_SIZE_KEY])
+        batch_end = batch_current + batch_size
+        self.item_paths = self.item_paths[batch_current:batch_end]
 
     def get_option(self, name, default):
         """Get an option from the request if available and fallback to the
@@ -84,12 +94,13 @@ class CatalogSourceSection(object):
                                  self.remote_skip_paths, self.queue_length,
                                  self.remote_username, self.remote_password)
         queue.start()
-
+        anno = IAnnotations(self.context)
         for item in queue:
             if not item:
                 continue
 
             item['_path'] = item['_path'][self.site_path_length:]
+            anno[BATCH_CURRENT_KEY] += 1
             yield item
 
 
@@ -112,27 +123,30 @@ class QueuedItemLoader(threading.Thread):
     def __iter__(self):
         while not self.finished or len(self.queue) > 0:
             while len(self.queue) == 0:
-                time.sleep(0.0001)
+                time.sleep(0.00001)
 
             yield self.queue.pop(0)
 
     def run(self):
         while not self.finished:
             while len(self.queue) >= self.queue_length:
-                time.sleep(0.0001)
+                time.sleep(0.00001)
 
             path = self.paths.pop(0)
             if not self._skip_path(path):
                 item = self._load_path(path)
                 self.queue.append(item)
 
-            if len(self.paths) == 0:
+            len_path = len(self.paths)
+            if len_path == 0:
                 self.finished = True
 
     def _skip_path(self, path):
         for skip_path in self.remote_skip_paths:
             if path.startswith(skip_path):
                 return True
+            # also skip path if not in good batch
+
         return False
 
     def _load_path(self, path):
@@ -140,7 +154,7 @@ class QueuedItemLoader(threading.Thread):
 
         resp = requests.get(
             item_url,
-            auth=(self.remote_username , self.remote_password),
+            auth=(self.remote_username, self.remote_password),
             timeout=60)
         content_type = resp.headers['content-type']
         if content_type != 'application/json':
