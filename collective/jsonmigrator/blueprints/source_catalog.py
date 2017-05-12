@@ -155,7 +155,7 @@ class QueuedItemLoader(threading.Thread):
         resp = requests.get(
             item_url,
             auth=(self.remote_username, self.remote_password),
-            timeout=180)
+            timeout=600)
         content_type = resp.headers['content-type']
         if content_type != 'application/json':
             logger.error('Could not get : {}'.format(resp.url))
